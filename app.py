@@ -1,0 +1,311 @@
+import os
+import json
+import re
+from datetime import datetime
+
+
+from flask import Flask, request, jsonify, send_file, render_template
+from flask_cors import CORS
+from dotenv import load_dotenv
+
+from google import genai
+from google.genai import types
+
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+
+import speech_recognition as sr
+import asyncio
+import edge_tts
+from pydub import AudioSegment
+from pydub.silence import detect_silence
+import smtplib
+from email.mime.text import MIMEText
+
+
+
+app = Flask(__name__)
+CORS(app)
+
+load_dotenv()
+EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY)
+MODEL_NAME = "gemini-3.1-flash-lite"
+
+SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials/service_account.json", SCOPE)
+gc = gspread.authorize(CREDS)
+spreadsheet = gc.open("DivyaSree_Whispers_Of_The_Wind")
+
+with open("prompts/system_prompt.txt", "r", encoding="utf-8") as f:
+    SYSTEM_PROMPT = f.read()
+active_chats = {}
+
+
+
+VOICE_MAP = {
+    "hindi": {"voice": "hi-IN-MadhurNeural", "rate": "+20%"},
+    "english_indian": {"voice": "en-IN-PrabhatNeural", "rate": "+25%"},
+    "english_us": {"voice": "en-US-AndrewMultilingualNeural", "rate": "+0%"},
+    "english_uk": {"voice": "en-GB-RyanNeural", "rate": "+0%"},
+}
+DEFAULT_VOICE = VOICE_MAP["english_uk"]
+
+
+
+STT_LANGUAGE_MAP = {
+    "hindi": "hi-IN",
+    "english_indian": "en-IN",
+    "english_us": "en-US",
+    "english_uk": "en-GB",
+}
+DEFAULT_STT_LANGUAGE = STT_LANGUAGE_MAP["english_uk"]
+
+def resolve_stt_language(language_choice):
+    key = (language_choice or "").strip().lower()
+    if key in STT_LANGUAGE_MAP:
+        return STT_LANGUAGE_MAP[key]
+    if "hindi" in key:
+        return STT_LANGUAGE_MAP["hindi"]
+    if "us" in key:
+        return STT_LANGUAGE_MAP["english_us"]
+    if "uk" in key or "british" in key:
+        return STT_LANGUAGE_MAP["english_uk"]
+    if "indian" in key:
+        return STT_LANGUAGE_MAP["english_indian"]
+    return DEFAULT_STT_LANGUAGE
+
+def convert_to_wav(input_path, output_path):
+    audio = AudioSegment.from_file(input_path)
+    audio.export(output_path, format="wav")
+    return output_path
+
+def transcribe(wav_path, language_choice=""):
+    recognizer = sr.Recognizer()
+    lang_code = resolve_stt_language(language_choice)
+
+    with sr.AudioFile(wav_path) as source:
+        audio_data = recognizer.record(source)
+
+    try:
+        return recognizer.recognize_google(audio_data, language=lang_code)
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        print("STT request error:", e)
+        return ""
+
+def speech_to_text(raw_audio_path, session_id, language_choice=""):
+    wav_path = f"static/audio/input_{session_id}.wav"
+    convert_to_wav(raw_audio_path, wav_path)
+    text = transcribe(wav_path, language_choice)
+    os.remove(wav_path)
+    return text
+
+
+def format_list_for_sheet(items):
+    if not items:
+        return ""
+    return "\n".join(f"- {item}" for item in items)
+
+def log_call_data(call_data):
+    name = call_data.get("name", "") or "Unknown"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    end_category = call_data.get("end_category", "")
+
+    if end_category in ("Later_Calls_For_Confirmation", "Negative_Framing"):
+        timing = call_data.get("reschedule_timing", "") or "NOT SAID"
+        row = [timestamp, name, timing]
+
+        spreadsheet.worksheet("Negative_Framing").append_row(row)
+
+        if "FLAG_TO_BE_CHECKED" not in timing:
+            spreadsheet.worksheet("Later_Calls_For_Confirmation").append_row(row)
+
+    elif end_category in ("Qualified_Leads", "Non-Qualified_Leads"):
+        questions = format_list_for_sheet(call_data.get("questions_asked", []))
+        answers = format_list_for_sheet(call_data.get("answers_given", []))
+        reason = call_data.get("reason", "")
+        row = [timestamp, name, questions, answers, reason]
+        spreadsheet.worksheet(end_category).append_row(row)
+
+    else:
+        print("Call not marked ended yet, or missing end_category:", repr(end_category))
+
+def send_confirmation_email(to_email, customer_name):
+    if not to_email:
+        return
+    body = (f"Hi {customer_name or 'there'},\n\n"
+            "Thank you for your time today. Our property expert will reach out "
+            "shortly to discuss financing, options, and next steps for "
+            "Whispers of the Wind, Nandi Valley.\n\nWarm regards,\nSwetha\nDivyasree Developers")
+    msg = MIMEText(body)
+    msg["Subject"] = "Divyasree Whispers of the Wind — Thank You"
+    msg["From"] = EMAIL_ADDRESS
+    msg["To"] = to_email
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
+            server.sendmail(EMAIL_ADDRESS, to_email, msg.as_string())
+    except Exception as e:
+        print("Email send error:", e)
+
+
+def get_or_create_chat(session_id):
+    if session_id not in active_chats:
+        active_chats[session_id] = client.chats.create(
+            model=MODEL_NAME,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                thinking_config=types.ThinkingConfig(thinking_level="minimal")
+            )
+        )
+    return active_chats[session_id]
+
+
+
+def start_call(session_id):
+    chat = get_or_create_chat(session_id)
+    response = chat.send_message("[CALL_TRIGGER: START_CALL]")
+    return response.text
+
+
+
+def extract_call_data(full_reply_text):
+    match = re.search(r"<CALL_DATA>(.*?)</CALL_DATA>", full_reply_text, re.DOTALL)
+
+    if match:
+        spoken_text = full_reply_text[:match.start()].strip()
+        json_text = match.group(1).strip()
+        try:
+            call_data = json.loads(json_text)
+        except json.JSONDecodeError:
+            call_data = {}
+    else:
+        spoken_text = full_reply_text.strip()
+        call_data = {}
+
+    return spoken_text, call_data
+
+
+PRONUNCIATION_MAP = {
+    "Divyasree": "Divya-shree",
+    "Nandi": "None-thee",
+    "Bengaluru": "Ben-gha-loo-roo",
+    "Bangalore": "Ben-gha-loo-roo",
+    "Aditya": "Aa-dheeth-thyaa",
+    "Heggadihalli": "Heg-gha-dha-ha-llee",
+    "Doddaballapura": "Though-the-bhal-lla-poo-raa",
+    "Doddaballapur": "Though-the-bhal-lla-poor",
+    "Taluk": "Thaa-look",
+    "Kempegowda": "Khem -peg-go-dhaa",
+    "Devanahalli": "They-vah-nah-hal-lee",
+    "Lakh": "Lak",
+    "Crore": "Cro"
+}
+
+def apply_pronunciation_fixes(text):
+    for word, phonetic in PRONUNCIATION_MAP.items():
+        text = re.sub(rf"\b{re.escape(word)}\b", phonetic, text, flags=re.IGNORECASE)
+    return text
+
+
+def cap_pause_length(audio_path, max_pause_ms=1000, padding_ms=150):
+    audio = AudioSegment.from_mp3(audio_path)
+    silence_ranges = detect_silence(audio, min_silence_len=500, silence_thresh=-45)
+
+    if not silence_ranges:
+        return
+
+    output = AudioSegment.empty()
+    prev_end = 0
+    for start, end in silence_ranges:
+        safe_cut_point = min(start + padding_ms, end)
+        output += audio[prev_end:safe_cut_point]
+        gap_len = max(min(end - safe_cut_point, max_pause_ms), 0)
+        output += AudioSegment.silent(duration=gap_len)
+        prev_end = end
+    output += audio[prev_end:]
+
+    output.export(audio_path, format="mp3")
+
+
+def resolve_voice(language_choice):
+        key = (language_choice or "").strip().lower()
+        if key in VOICE_MAP:
+            return VOICE_MAP[key]
+        if "hindi" in key:
+            return VOICE_MAP["hindi"]
+        if "us" in key:
+            return VOICE_MAP["english_us"]
+        if "uk" in key or "british" in key:
+            return VOICE_MAP["english_uk"]
+        if "indian" in key:
+            return VOICE_MAP["english_indian"]
+        return DEFAULT_VOICE
+
+def speak(text, session_id, language_choice=""):
+    voice_config = resolve_voice(language_choice)
+    voice = voice_config["voice"]
+    rate = voice_config["rate"]
+
+    text = apply_pronunciation_fixes(text)
+    output_path = f"static/audio/reply_{session_id}.mp3"
+
+    async def generate():
+        communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+        await communicate.save(output_path)
+
+    asyncio.run(generate())
+    cap_pause_length(output_path, max_pause_ms=1000, padding_ms=150)
+
+    return output_path
+
+
+
+@app.route("/")
+def home():
+    return render_template("index.html")
+
+@app.route("/start", methods=["POST"])
+def start():
+    session_id = request.json.get("session_id")
+    opening_reply = start_call(session_id)
+    spoken, data = extract_call_data(opening_reply)
+    audio_path = speak(spoken, session_id, data.get("language_choice", ""))
+    return jsonify({"text": spoken, "audio_url": "/" + audio_path, "call_data": data})
+
+@app.route("/talk", methods=["POST"])
+def talk():
+    session_id = request.form.get("session_id")
+    language_choice = request.form.get("language_choice", "")
+    audio_file = request.files["audio"]
+
+    raw_path = f"static/audio/raw_{session_id}.webm"
+    audio_file.save(raw_path)
+
+    user_text = speech_to_text(raw_path, session_id, language_choice)
+    os.remove(raw_path)
+
+    chat = get_or_create_chat(session_id)
+    reply = chat.send_message(user_text if user_text else "[No speech detected]")
+    spoken, data = extract_call_data(reply.text)
+
+    audio_path = speak(spoken, session_id, data.get("language_choice", ""))
+
+    if data.get("call_ended"):
+        log_call_data(data)
+        if data.get("email_stage") == "confirmed" and data.get("email"):
+            send_confirmation_email(data.get("email"), data.get("name"))
+
+    return jsonify({
+        "user_text": user_text,
+        "text": spoken,
+        "audio_url": "/" + audio_path,
+        "call_data": data
+    })
+
+if __name__ == "__main__":
+    app.run(port=8000, debug=True)

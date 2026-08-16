@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Divyasree Whispers of the Wind — AI Agent</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin-top: 100px;
+      background-color: #0d0d0d;
+      color: #f0f0f0;
+    }
+    #startBtn {
+      font-size: 20px;
+      padding: 15px 30px;
+      cursor: pointer;
+      background-color: #1a1a1a;
+      color: #f0f0f0;
+      border: 1px solid #444;
+      border-radius: 8px;
+    }
+    #startBtn:hover { background-color: #262626; }
+    #status { margin-top: 20px; font-size: 18px; color: #aaa; }
+    #hint { margin-top: 10px; font-size: 14px; color: #777; }
+  </style>
+</head>
+<body>
+  <audio id="bgAmbience" src="/static/audio/background_ambience.mp3" loop></audio>
+
+  <h2>Divyasree — Whispers of the Wind</h2>
+  <button id="startBtn">📞 Start Call</button>
+  <p id="status"></p>
+  <p id="hint"></p>
+
+  <script>
+    let mediaRecorder, audioChunks = [];
+    let audioContext, analyser;
+    const SILENCE_THRESHOLD = 10;
+    const SILENCE_DURATION = 600;
+    const MIN_LISTEN_TIME = 10000;
+    const POST_PLAYBACK_BUFFER = 400;
+    let sessionId = "session_" + Math.random().toString(36).slice(2);
+    let currentLanguageChoice = "";
+    let stream;
+
+    function setStatus(mode) {
+      const statusEl = document.getElementById('status');
+      const hintEl = document.getElementById('hint');
+      if (mode === "connecting") {
+        statusEl.innerText = "🔄 Connecting...";
+        hintEl.innerText = "Please wait a moment.";
+      } else if (mode === "speaking") {
+        statusEl.innerText = "🔊 Agent Speaking...";
+        hintEl.innerText = "Please wait until the agent finishes.";
+      } else if (mode === "listening") {
+        statusEl.innerText = "🎤 Listening...";
+        hintEl.innerText = "Speak now. It will detect automatically when you stop.";
+      } else if (mode === "thinking") {
+        statusEl.innerText = "🤔 Thinking...";
+        hintEl.innerText = "Please wait, the AI is preparing a response.";
+      } else if (mode === "ending") {
+        statusEl.innerText = "👋 Wrapping up...";
+        hintEl.innerText = "Please wait while the call ends.";
+      } else if (mode === "ended") {
+        statusEl.innerText = "✅ Call ended.";
+        hintEl.innerText = "";
+      }
+    }
+
+    async function startCall() {
+      const bg = document.getElementById('bgAmbience');
+      bg.volume = 0.08;
+      bg.play();
+
+      document.getElementById('startBtn').style.display = 'none';
+      setStatus("connecting");
+
+      const res = await fetch('/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId})
+      });
+      const data = await res.json();
+      currentLanguageChoice = data.call_data.language_choice || "";
+      await playAudio(data.audio_url);
+      if (!data.call_data.call_ended) {
+        await new Promise(r => setTimeout(r, POST_PLAYBACK_BUFFER));
+        listenForSpeech();
+      }
+    }
+
+    function playAudio(url) {
+      return new Promise((resolve) => {
+        const audio = new Audio(url + "?t=" + Date.now());
+        audio.onended = resolve;
+        setStatus("speaking");
+        audio.play();
+      });
+    }
+
+    async function listenForSpeech() {
+      document.getElementById('bgAmbience').muted = true;
+      setStatus("listening");
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+      }
+
+      audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+
+      audioChunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+      mediaRecorder.onstop = handleRecordingStop;
+      mediaRecorder.start();
+
+      monitorSilence();
+    }
+
+    function monitorSilence() {
+      const dataArray = new Uint8Array(analyser.fftSize);
+      const recordingStartTime = Date.now();
+      let silenceStart = null;
+
+      function check() {
+        if (mediaRecorder.state !== "recording") return;
+
+        const elapsed = Date.now() - recordingStartTime;
+        analyser.getByteTimeDomainData(dataArray);
+        let sumSquares = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const val = (dataArray[i] - 128) / 128;
+          sumSquares += val * val;
+        }
+        const rms = Math.sqrt(sumSquares / dataArray.length) * 100;
+        const isSpeaking = rms > SILENCE_THRESHOLD;
+
+        if (elapsed >= MIN_LISTEN_TIME) {
+          if (isSpeaking) {
+            silenceStart = null;
+          } else {
+            if (silenceStart === null) silenceStart = Date.now();
+            if (Date.now() - silenceStart > SILENCE_DURATION) {
+              mediaRecorder.stop();
+              return;
+            }
+          }
+        }
+        requestAnimationFrame(check);
+      }
+      check();
+    }
+
+    async function handleRecordingStop() {
+      document.getElementById('bgAmbience').muted = false;
+      audioContext.close();
+      const blob = new Blob(audioChunks, { type: 'audio/webm' });
+      setStatus("thinking");
+
+      const formData = new FormData();
+      formData.append('audio', blob, 'input.webm');
+      formData.append('session_id', sessionId);
+      formData.append('language_choice', currentLanguageChoice);
+
+      const res = await fetch('/talk', { method: 'POST', body: formData });
+      const data = await res.json();
+      currentLanguageChoice = data.call_data.language_choice || currentLanguageChoice;
+
+      await playAudio(data.audio_url);
+
+      if (data.call_data.call_ended) {
+        setStatus("ending");
+        await playAudio('/static/audio/call_end.mp3');
+        setStatus("ended");
+        stream.getTracks().forEach(t => t.stop());
+        document.getElementById('bgAmbience').pause();
+      } else {
+        await new Promise(r => setTimeout(r, POST_PLAYBACK_BUFFER));
+        listenForSpeech();
+      }
+    }
+
+    document.getElementById('startBtn').addEventListener('click', startCall);
+  </script>
+</body>
+</html>

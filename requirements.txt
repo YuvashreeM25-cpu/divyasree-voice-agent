@@ -1,0 +1,10 @@
+flask
+flask-cors
+google-genai
+gspread
+oauth2client
+python-dotenv
+SpeechRecognition
+edge-tts
+pydub
+gunicorn

@@ -1,0 +1,9 @@
+venv/
+.env
+credentials/
+static/audio/reply_*
+static/audio/input_*
+static/audio/raw_*
+static/audio/temp_*
+__pycache__/
+*.pyc
