@@ -2,7 +2,8 @@ import os
 import json
 import re
 from datetime import datetime
-
+import base64
+from io import BytesIO
 
 from flask import Flask, request, jsonify, send_file, render_template
 from flask_cors import CORS
@@ -13,7 +14,7 @@ from google.genai import types
 
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-
+import requests
 import speech_recognition as sr
 import asyncio
 import edge_tts
@@ -30,6 +31,7 @@ CORS(app)
 load_dotenv()
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite"
@@ -138,18 +140,18 @@ def log_call_data(call_data):
 def send_confirmation_email(to_email, customer_name):
     if not to_email:
         return
-    body = (f"Hi {customer_name or 'there'},\n\n"
-            "Thank you for your time today. Our property expert will reach out "
-            "shortly to discuss financing, options, and next steps for "
-            "Whispers of the Wind, Nandi Valley.\n\nWarm regards,\nSwetha\nDivyasree Developers")
-    msg = MIMEText(body)
-    msg["Subject"] = "Divyasree Whispers of the Wind — Thank You"
-    msg["From"] = EMAIL_ADDRESS
-    msg["To"] = to_email
+    url = "https://api.brevo.com/v3/smtp/email"
+    headers = {"accept": "application/json", "api-key": BREVO_API_KEY, "content-type": "application/json"}
+    payload = {
+        "sender": {"email": EMAIL_ADDRESS, "name": "Swetha - Divyasree Developers"},
+        "to": [{"email": to_email}],
+        "subject": "Divyasree Whispers of the Wind — Thank You",
+        "textContent": (f"Hi {customer_name or 'there'},\n\nThank you for your time today. "
+                         "Our property expert will reach out shortly to discuss financing, options, "
+                         "and next steps for Whispers of the Wind, Nandi Valley.\n\nWarm regards,\nSwetha\nDivyasree Developers")
+    }
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_ADDRESS, EMAIL_APP_PASSWORD)
-            server.sendmail(EMAIL_ADDRESS, to_email, msg.as_string())
+        requests.post(url, headers=headers, json=payload, timeout=15)
     except Exception as e:
         print("Email send error:", e)
 
@@ -196,7 +198,6 @@ PRONUNCIATION_MAP = {
     "Nandi": "None-thee",
     "Bengaluru": "Ben-gha-loo-roo",
     "Bangalore": "Ben-gha-loo-roo",
-    "Aditya": "Aa-dheeth-thyaa",
     "Heggadihalli": "Heg-gha-dha-ha-llee",
     "Doddaballapura": "Though-the-bhal-lla-poo-raa",
     "Doddaballapur": "Though-the-bhal-lla-poor",
@@ -213,12 +214,14 @@ def apply_pronunciation_fixes(text):
     return text
 
 
-def cap_pause_length(audio_path, max_pause_ms=1000, padding_ms=150):
-    audio = AudioSegment.from_mp3(audio_path)
+def cap_pause_length_bytes(audio_bytes, max_pause_ms=1000, padding_ms=150):
+    audio = AudioSegment.from_file(BytesIO(audio_bytes), format="mp3")
     silence_ranges = detect_silence(audio, min_silence_len=500, silence_thresh=-45)
 
+    out_buffer = BytesIO()
     if not silence_ranges:
-        return
+        audio.export(out_buffer, format="mp3")
+        return out_buffer.getvalue()
 
     output = AudioSegment.empty()
     prev_end = 0
@@ -230,7 +233,8 @@ def cap_pause_length(audio_path, max_pause_ms=1000, padding_ms=150):
         prev_end = end
     output += audio[prev_end:]
 
-    output.export(audio_path, format="mp3")
+    output.export(out_buffer, format="mp3")
+    return out_buffer.getvalue()
 
 
 def resolve_voice(language_choice):
@@ -247,22 +251,22 @@ def resolve_voice(language_choice):
             return VOICE_MAP["english_indian"]
         return DEFAULT_VOICE
 
-def speak(text, session_id, language_choice=""):
+def speak(text, language_choice=""):
     voice_config = resolve_voice(language_choice)
     voice = voice_config["voice"]
     rate = voice_config["rate"]
-
     text = apply_pronunciation_fixes(text)
-    output_path = f"static/audio/reply_{session_id}.mp3"
 
-    async def generate():
+    async def synthesize():
         communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
-        await communicate.save(output_path)
+        audio_bytes = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_bytes.extend(chunk["data"])
+        return bytes(audio_bytes)
 
-    asyncio.run(generate())
-    cap_pause_length(output_path, max_pause_ms=1000, padding_ms=150)
-
-    return output_path
+    raw_audio = asyncio.run(synthesize())
+    return cap_pause_length_bytes(raw_audio)
 
 
 
@@ -275,8 +279,9 @@ def start():
     session_id = request.json.get("session_id")
     opening_reply = start_call(session_id)
     spoken, data = extract_call_data(opening_reply)
-    audio_path = speak(spoken, session_id, data.get("language_choice", ""))
-    return jsonify({"text": spoken, "audio_url": "/" + audio_path, "call_data": data})
+    audio_bytes = speak(spoken, data.get("language_choice", ""))
+    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+    return jsonify({"text": spoken, "audio_base64": audio_b64, "call_data": data})
 
 @app.route("/talk", methods=["POST"])
 def talk():
@@ -286,7 +291,6 @@ def talk():
 
     raw_path = f"static/audio/raw_{session_id}.webm"
     audio_file.save(raw_path)
-
     user_text = speech_to_text(raw_path, session_id, language_choice)
     os.remove(raw_path)
 
@@ -294,7 +298,8 @@ def talk():
     reply = chat.send_message(user_text if user_text else "[No speech detected]")
     spoken, data = extract_call_data(reply.text)
 
-    audio_path = speak(spoken, session_id, data.get("language_choice", ""))
+    audio_bytes = speak(spoken, data.get("language_choice", ""))
+    audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
     if data.get("call_ended"):
         log_call_data(data)
@@ -302,10 +307,8 @@ def talk():
             send_confirmation_email(data.get("email"), data.get("name"))
 
     return jsonify({
-        "user_text": user_text,
-        "text": spoken,
-        "audio_url": "/" + audio_path,
-        "call_data": data
+        "user_text": user_text, "text": spoken,
+        "audio_base64": audio_b64, "call_data": data
     })
 
 if __name__ == "__main__":

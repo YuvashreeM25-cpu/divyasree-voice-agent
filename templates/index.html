@@ -6,7 +6,7 @@
     body {
       font-family: Arial, sans-serif;
       text-align: center;
-      margin-top: 100px;
+      margin-top: 60px;
       background-color: #0d0d0d;
       color: #f0f0f0;
     }
@@ -22,6 +22,19 @@
     #startBtn:hover { background-color: #262626; }
     #status { margin-top: 20px; font-size: 18px; color: #aaa; }
     #hint { margin-top: 10px; font-size: 14px; color: #777; }
+    #infoPanel {
+      max-width: 480px;
+      margin: 30px auto 0;
+      text-align: left;
+      background-color: #161616;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 18px 22px;
+      font-size: 14px;
+      color: #ccc;
+      line-height: 1.6;
+    }
+    #infoPanel h4 { margin-top: 0; color: #f0f0f0; }
   </style>
 </head>
 <body>
@@ -31,6 +44,16 @@
   <button id="startBtn">📞 Start Call</button>
   <p id="status"></p>
   <p id="hint"></p>
+
+  <div id="infoPanel">
+    <h4>Before you start:</h4>
+    <p>⏱️ Answer each question within <strong>10 seconds</strong>.</p>
+    <p>🗣️ Be <strong>precise and clear</strong> when answering — avoid ambiguity.</p>
+    <p><strong>There are 3 modes:</strong></p>
+    <p>🎤 <strong>Listening</strong> — active while you are speaking.</p>
+    <p>🔊 <strong>Agent Speaking</strong> — active while the AI is speaking.</p>
+    <p>🤔 <strong>Thinking</strong> — active while the AI is processing your answer.</p>
+  </div>
 
   <script>
     let mediaRecorder, audioChunks = [];
@@ -54,7 +77,7 @@
         hintEl.innerText = "Please wait until the agent finishes.";
       } else if (mode === "listening") {
         statusEl.innerText = "🎤 Listening...";
-        hintEl.innerText = "Speak now. It will detect automatically when you stop.";
+        hintEl.innerText = "Speak now, clearly and precisely. Detects automatically when you stop.";
       } else if (mode === "thinking") {
         statusEl.innerText = "🤔 Thinking...";
         hintEl.innerText = "Please wait, the AI is preparing a response.";
@@ -73,6 +96,7 @@
       bg.play();
 
       document.getElementById('startBtn').style.display = 'none';
+      document.getElementById('infoPanel').style.display = 'none';
       setStatus("connecting");
 
       const res = await fetch('/start', {
@@ -82,14 +106,26 @@
       });
       const data = await res.json();
       currentLanguageChoice = data.call_data.language_choice || "";
-      await playAudio(data.audio_url);
+      await playAudioFromBase64(data.audio_base64);
       if (!data.call_data.call_ended) {
         await new Promise(r => setTimeout(r, POST_PLAYBACK_BUFFER));
         listenForSpeech();
       }
     }
 
-    function playAudio(url) {
+    function playAudioFromBase64(base64Data) {
+      return new Promise((resolve) => {
+        const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+        setStatus("speaking");
+        audio.play();
+      });
+    }
+
+    function playAudioFromUrl(url) {
       return new Promise((resolve) => {
         const audio = new Audio(url + "?t=" + Date.now());
         audio.onended = resolve;
@@ -103,11 +139,7 @@
       setStatus("listening");
       if (!stream) {
         stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
         });
       }
 
@@ -175,11 +207,11 @@
       const data = await res.json();
       currentLanguageChoice = data.call_data.language_choice || currentLanguageChoice;
 
-      await playAudio(data.audio_url);
+      await playAudioFromBase64(data.audio_base64);
 
       if (data.call_data.call_ended) {
         setStatus("ending");
-        await playAudio('/static/audio/call_end.mp3');
+        await playAudioFromUrl('/static/audio/call_end.mp3');
         setStatus("ended");
         stream.getTracks().forEach(t => t.stop());
         document.getElementById('bgAmbience').pause();
