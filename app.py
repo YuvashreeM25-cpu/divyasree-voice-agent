@@ -35,7 +35,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite"
 
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-CREDS = ServiceAccountCredentials.from_json_keyfile_name("credentials/service_account.json", SCOPE)
+CREDS_PATH = os.getenv("GOOGLE_CREDS_PATH", "credentials/service_account.json")
+CREDS = ServiceAccountCredentials.from_json_keyfile_name(CREDS_PATH, SCOPE)
 gc = gspread.authorize(CREDS)
 spreadsheet = gc.open("DivyaSree_Whispers_Of_The_Wind")
 
