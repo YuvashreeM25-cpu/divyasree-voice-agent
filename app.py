@@ -206,7 +206,9 @@ def send_confirmation_email(to_email, customer_name):
         "textContent": body
     }
     try:
-        requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        print("Brevo status:", response.status_code)
+        print("Brevo response:", response.text)
     except Exception as e:
         print("Email send error:", e)
 
@@ -311,6 +313,7 @@ def speak(text, language_choice=""):
     voice = voice_config["voice"]
     rate = voice_config["rate"]
     text = apply_pronunciation_fixes(text)
+    text = re.sub(r'(?<=\w)-(?=\w)', ' ', text)
 
     async def synthesize():
         communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
