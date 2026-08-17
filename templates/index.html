@@ -49,6 +49,7 @@
     <h4>Before you start:</h4>
     <p>⏱️ Answer each question within <strong>10 seconds</strong>.</p>
     <p>🗣️ Be <strong>precise and clear</strong> when answering — avoid ambiguity.</p>
+    <p>⏳ The server may take up to ~2 minutes to fully wake up on the very first response — please be patient after answering your name.</p>
     <p><strong>There are 3 modes:</strong></p>
     <p>🎤 <strong>Listening</strong> — active while you are speaking.</p>
     <p>🔊 <strong>Agent Speaking</strong> — active while the AI is speaking.</p>
@@ -96,7 +97,6 @@
       bg.play();
 
       document.getElementById('startBtn').style.display = 'none';
-      document.getElementById('infoPanel').style.display = 'none';
       setStatus("connecting");
 
       const res = await fetch('/start', {

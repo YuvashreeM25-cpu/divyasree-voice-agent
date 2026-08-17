@@ -137,18 +137,73 @@ def log_call_data(call_data):
     else:
         print("Call not marked ended yet, or missing end_category:", repr(end_category))
 
+PROJECT_DETAILS_TEXT = """
+PROJECT OVERVIEW
+Whispers of the Wind — Newly Launched Premium Private Valley Plots
+Location: Nandi Hills, Heggadihalli Village, Doddaballapura Taluk, Bengaluru Rural, Pincode 562110
+Total Extent: 38 Acres | 207 luxury villa plots
+Plot Sizes: 1,200 to 4,000 sq. ft.
+RERA Registered: Yes (RERA No. PRM/KA/RERA/1250/301/PR/070525/007718)
+Possession: Last date to possess — December 31, 2029
+
+PRICING
+Starting from Rs. 92.4 Lakh to Rs. 3.08 Cr (inclusive of taxes)
+Base price: approx. Rs. 7,700 per sq. ft.
+  1,200 sq.ft. — Rs. 92.4 Lakh
+  1,800 sq.ft. — Rs. 1.39 Cr
+  2,003 sq.ft. — Rs. 1.54 Cr
+  2,400 sq.ft. — Rs. 1.85 Cr
+  3,199 sq.ft. — Rs. 2.46 Cr
+  4,000 sq.ft. — Rs. 3.08 Cr
+
+SITE INFRASTRUCTURE
+- Electrical supply from 4 KVA onwards (as per KERC guidelines, based on plot size)
+- Gravity-fed water system from a central ground-level reservoir
+- STP-treated water for landscaping and irrigation
+- Percolation pits integrated into stormwater drainage
+- Concrete paver roads and pedestrian pathways
+- LED street lighting throughout
+
+AMENITIES
+- 20,000+ sq. ft. clubhouse, swimming pool, indoor games room, gymnasium
+- Badminton courts, library & lounge, yoga deck, mini-theatre
+- Multipurpose hall, party deck, spa & salon, business centre
+- EV charging stations, cycle stacking zone, curated restaurant
+- Skating rink, futsal court, pickleball & putt-putt golf
+- Five themed parks with eco-trails, biker pods, sound sculptures & arrival plaza
+
+KEY CONNECTIVITY
+- Kempegowda International Airport — 14 km / 20 mins
+- Nandi Hills — 6 km / 10 mins
+- Devanahalli Business Park — 15 km / 25 mins
+- Stonehill International School — 29 km / 40 mins
+- Akash Hospital, Devanahalli — 13 km / 25 mins
+- Aerospace SEZ & Hardware Park — 12-15 km / 20-25 mins
+- RMZ Galleria Mall, Yelahanka — 32 km / 45 mins
+
+ABOUT DIVYASREE DEVELOPERS
+Founded in 1997 and headquartered in Bengaluru, Divyasree Developers has over two decades of
+experience delivering residential, commercial, and IT infrastructure projects across South India.
+Led by Mr. Bhaskar Bhat, the group is known for timely delivery, customer-centricity, and green
+architecture, with landmark developments including Divyasree Republic of Whitefield,
+Divyasree 77 Degree Place, and Divyasree Technopark.
+"""
+
 def send_confirmation_email(to_email, customer_name):
     if not to_email:
         return
     url = "https://api.brevo.com/v3/smtp/email"
     headers = {"accept": "application/json", "api-key": BREVO_API_KEY, "content-type": "application/json"}
+    intro = (f"Hi {customer_name or 'there'},\n\n"
+             "Thank you for your time today. Our property expert will reach out shortly to discuss "
+             "financing, options, and next steps.\n\nHere are the full details of Whispers of the Wind "
+             "for your reference:\n")
+    body = intro + PROJECT_DETAILS_TEXT + "\nWarm regards,\nSwetha\nDivyasree Developers"
     payload = {
         "sender": {"email": EMAIL_ADDRESS, "name": "Swetha - Divyasree Developers"},
         "to": [{"email": to_email}],
-        "subject": "Divyasree Whispers of the Wind — Thank You",
-        "textContent": (f"Hi {customer_name or 'there'},\n\nThank you for your time today. "
-                         "Our property expert will reach out shortly to discuss financing, options, "
-                         "and next steps for Whispers of the Wind, Nandi Valley.\n\nWarm regards,\nSwetha\nDivyasree Developers")
+        "subject": "Divyasree Whispers of the Wind — Thank You & Project Details",
+        "textContent": body
     }
     try:
         requests.post(url, headers=headers, json=payload, timeout=15)
